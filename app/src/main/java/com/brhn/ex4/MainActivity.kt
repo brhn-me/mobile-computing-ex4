@@ -13,12 +13,16 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -32,10 +36,17 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.Worker
+import androidx.work.WorkerParameters
 import com.brhn.ex4.ui.theme.EX4Theme
+import java.util.concurrent.TimeUnit
 
 
 class MainActivity : ComponentActivity(), SensorEventListener {
@@ -51,8 +62,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        askNotificationPermission()
+
         // notification
         createNotificationChannel()
+
+        scheduleRecurringNotificationWork()
 
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
@@ -60,29 +75,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val pendingIntent: PendingIntent =
             PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
 
-        val builder = NotificationCompat.Builder(this, "channel_id")
-            .setContentTitle("My notification")
-            .setContentText("Much longer text that cannot fit one line...")
-            .setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText("Much longer text that cannot fit one line...")
-            )
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setSmallIcon(androidx.core.R.drawable.ic_call_answer)
-            // Set the intent that fires when the user taps the notification.
-            .setContentIntent(pendingIntent)
-            .setAutoCancel(true)
-
-        with(NotificationManagerCompat.from(this)) {
-            if (ActivityCompat.checkSelfPermission(
-                    this@MainActivity,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                return@with
-            }
-            notify(1234, builder.build())
-        }
+        val builder =
+            NotificationCompat.Builder(this, "channel_id").setContentTitle("My notification")
+                .setContentText("Much longer text that cannot fit one line...").setStyle(
+                    NotificationCompat.BigTextStyle()
+                        .bigText("Much longer text that cannot fit one line...")
+                ).setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setSmallIcon(androidx.core.R.drawable.ic_call_answer)
+                // Set the intent that fires when the user taps the notification.
+                .setContentIntent(pendingIntent).setAutoCancel(true)
 
 
         // sensor
@@ -94,8 +95,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         setContent {
             EX4Theme {
                 Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background
                 ) {
                     Column {
                         val accData = remember { accelerometerData }
@@ -104,7 +104,23 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         SensorReading("Accelerometer", accData.value)
                         SensorReading("Gyroscope", gyroData.value)
                         SensorReading("Magnetic Field", magData.value)
+                        Button(onClick = {
+
+                            with(NotificationManagerCompat.from(baseContext)) {
+                                if (ActivityCompat.checkSelfPermission(
+                                        this@MainActivity, Manifest.permission.POST_NOTIFICATIONS
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    return@with
+                                }
+                                notify(1234, builder.build())
+                            }
+
+                        }) {
+                            Text(text = "Click Me!")
+                        }
                     }
+
                 }
             }
         }
@@ -116,23 +132,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     Lifecycle.Event.ON_RESUME -> {
                         accelerometer?.also { acc ->
                             sensorManager.registerListener(
-                                this@MainActivity,
-                                acc,
-                                SensorManager.SENSOR_DELAY_NORMAL
+                                this@MainActivity, acc, SensorManager.SENSOR_DELAY_NORMAL
                             )
                         }
                         gyroscope?.also { gyro ->
                             sensorManager.registerListener(
-                                this@MainActivity,
-                                gyro,
-                                SensorManager.SENSOR_DELAY_NORMAL
+                                this@MainActivity, gyro, SensorManager.SENSOR_DELAY_NORMAL
                             )
                         }
                         magneticField?.also { mag ->
                             sensorManager.registerListener(
-                                this@MainActivity,
-                                mag,
-                                SensorManager.SENSOR_DELAY_NORMAL
+                                this@MainActivity, mag, SensorManager.SENSOR_DELAY_NORMAL
                             )
                         }
                     }
@@ -163,6 +173,43 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     }
 
+    private fun askNotificationPermission() {
+        // this is only necessary for API level >= 33 (TIRAMISU)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                // Log.e(TAG, "PERMISSION_GRANTED")
+            } else {
+                // Log.e(TAG, "NO_PERMISSION")
+                // Directly ask for the permission
+                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            Toast.makeText(this, "Notifications permission granted", Toast.LENGTH_SHORT).show()
+        } else {
+//            Toast.makeText(
+//                this, "${getString(R.string.app_name)} can't post notifications without Notification permission",
+//                Toast.LENGTH_LONG
+//            ).show()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val settingsIntent: Intent =
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                startActivity(settingsIntent)
+            }
+        }
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val name = "A channel"
@@ -177,6 +224,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             notificationManager.createNotificationChannel(channel)
         }
     }
+
+    private fun scheduleRecurringNotificationWork() {
+        val notificationWorkRequest =
+            OneTimeWorkRequestBuilder<NotificationWorker>()
+                .setInitialDelay(30, TimeUnit.SECONDS)
+                .build()
+
+        WorkManager.getInstance(this).enqueue(notificationWorkRequest)
+    }
 }
 
 @Composable
@@ -188,8 +244,7 @@ fun SensorReading(
 ) {
     Column(modifier = modifier.padding(padding)) {
         Text(
-            text = sensorName,
-            fontWeight = FontWeight.Bold
+            text = sensorName, fontWeight = FontWeight.Bold
         )
         Text(
             text = "X: ${data.first}\nY: ${data.second}\nZ: ${data.third}\n"
@@ -206,5 +261,42 @@ fun GreetingPreview() {
             SensorReading("Gyroscope", Triple(0f, 0f, 0f))
             SensorReading("Magnetic Field", Triple(0f, 0f, 0f))
         }
+    }
+}
+
+
+class NotificationWorker(appContext: Context, workerParams: WorkerParameters) :
+    Worker(appContext, workerParams) {
+
+    override fun doWork(): Result {
+        showNotification()
+        return Result.success()
+    }
+
+    private fun showNotification() {
+        val notificationManager =
+            applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val intent = Intent(applicationContext, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val pendingIntent: PendingIntent = PendingIntent.getActivity(
+            applicationContext,
+            0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(applicationContext, "channel_id")
+            .setContentTitle("Work Notification")
+            .setContentText("This is a notification from the WorkManager task.")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(pendingIntent)
+            .setSmallIcon(androidx.core.R.drawable.ic_call_answer)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(1, notification)
+
     }
 }
